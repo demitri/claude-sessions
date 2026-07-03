@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Generated dashboard snapshot (from `--once`)
+index.html
+
+# Local runtime log
+*.log
