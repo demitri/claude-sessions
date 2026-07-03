@@ -18,9 +18,11 @@ Open ideas (none blocking; v1 works):
       session's resume command, for fast post-reboot restoration.
 - [ ] **Context-window column** — `ctx_tokens` is already parsed; surface it
       (e.g. latest context size, maybe as a % of the model's window).
+- [ ] **README screenshot** — capture the dashboard (run it, screenshot, commit
+      as e.g. `docs/screenshot.png`) and embed near the top of `README.md`;
+      the repo is public now and a visual tool sells itself with a picture.
 - [ ] **Auto-start on login** — a LaunchAgent plist so the dashboard is always up
       at `127.0.0.1:7878`.
-- [ ] First git commit + decide on a remote (none configured yet).
 - [ ] Consider a `--restore-sheet` mode that writes the markdown restore sheet
       (the original one-off that seeded this project).
 
@@ -32,6 +34,8 @@ Open ideas (none blocking; v1 works):
 
 ## Done
 
+- [x] First git commit + remote (2026-07-03) — public repo at
+      `github.com:demitri/claude-sessions`.
 - [x] **Session transcript viewer** (2026-07-02) — `/session?id=[&agent=]` page:
       full history (incl. content-bearing `system` markers), prompt-jump
       sidebar, search with scope toggle (default prompts+assistant), collapsed
