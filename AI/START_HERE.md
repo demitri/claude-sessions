@@ -23,9 +23,9 @@ recovery console.
 - `claude-status.py` — the whole thing: a stdlib HTTP server + an embedded
   single-page app (HTML/CSS/JS in one Python string). **Works.** Verified serving
   ~270 historical sessions; HTTP 200, `/api/sessions` returns parsed JSON.
-- Just moved here from `~/claude-status/` (now deleted). Fresh git repo on
-  `main`, **no commits yet** — first commit not yet made (left to the user).
-- No remote configured.
+- Public repo at `github.com:demitri/claude-sessions` (origin); history starts
+  at the 2026-07-03 initial commit. Originally built at `~/claude-status/`
+  (now deleted).
 
 ## Where things are
 
