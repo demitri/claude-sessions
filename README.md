@@ -4,9 +4,10 @@ A local dashboard for your Claude Code sessions. Scans `~/.claude/projects/` and
 serves a sortable, filterable web page showing your sessions grouped by project
 directory, with per-session stats and one-click resume commands.
 
-Runs on the Python 3 standard library — no install step required. Third-party
-packages are allowed where one clearly earns its place, but stdlib stays the
-default so "just run it" keeps working.
+Runs on the Python 3 standard library — no install step required (tested on
+3.13; any recent Python 3 should work). Third-party packages are allowed where
+one clearly earns its place, but stdlib stays the default so "just run it"
+keeps working.
 
 ## Run
 
@@ -54,6 +55,21 @@ file by mtime+size), and the page auto-refreshes every 30 s.
   with as *done* (hidden by default; "✕ Done" reveals them). Both marks persist
   server-side across reboots and browsers.
 - **⧉ resume** — copies `cd "<dir>" && claude --resume <id>` to the clipboard.
+
+## Transcript reader
+
+Every session row has a **view** link that opens the full conversation on its
+own linkable page (`/session?id=<id>`):
+
+- User and assistant turns rendered distinctly, with tool calls and thinking
+  blocks collapsed behind one-line summaries — expand only what you care about.
+- **Search** across the transcript, with a scope toggle (prompts only vs
+  everything).
+- **Prompt-jump navigator** — a sidebar of your prompts for skipping straight
+  to any point in the conversation.
+- **Sub-agents panel** — sessions that spawned sub-agents list them for lazy
+  expansion, and each sub-agent transcript is linkable too
+  (`/session?id=<id>&agent=<agentId>`).
 
 ## Why it exists
 
