@@ -537,6 +537,23 @@ def extract_human_prompt(content, parts):
     return False, ""
 
 
+def _harness_event(content):
+    """Classify a harness-injected `user` turn that the user never typed, so the
+    reader can style it distinctly instead of as a human prompt.
+
+    Currently one kind: `task_notification` — a background-task completion notice
+    (a `Bash(run_in_background)` or background `Agent`/`Task` finishing), which
+    Claude Code injects as a `user`-role turn whose content opens with the literal
+    `<task-notification>` tag (an XML metadata block, optionally followed by a
+    Markdown body). The leading tag is the reliable, structural discriminator —
+    unlike the loop/queued re-injected prompts, which carry no in-band marker (see
+    AI/transcript.md; those are flagged by the top-level `isMeta` field instead)."""
+    txt = content if isinstance(content, str) else _first_text(content)
+    if txt and txt.lstrip().startswith("<task-notification>"):
+        return "task_notification"
+    return None
+
+
 def _subagent_dir(session_path):
     """Where this transcript's sub-agent files live.
 
@@ -717,6 +734,7 @@ def parse_transcript(path):
                     parts = _parts(content)
                     is_prompt = False
                     label = ""
+                    event = None
                     if typ == "user":
                         user_msgs += 1
                         if title is None:
@@ -724,6 +742,20 @@ def parse_transcript(path):
                             if m:
                                 title = m.group(1)
                         is_prompt, label = extract_human_prompt(content, parts)
+                        event = _harness_event(content)
+                        if not event and o.get("isMeta") is True and is_prompt:
+                            # isMeta:True marks a harness-injected turn (a /loop or
+                            # scheduled prompt replayed on wake, a skill preamble,
+                            # "Continue from where you left off") — prose the user
+                            # didn't type here. Gate on `is_prompt` so we only
+                            # reclassify turns that would otherwise show as human
+                            # prompts; an isMeta turn carrying a tool_result (never
+                            # a prompt) is untouched, so no output can be dropped.
+                            event = "injected"
+                        if event:
+                            # a harness injection, not typed by the user — keep it
+                            # in the transcript but out of the human-prompt nav
+                            is_prompt = False
                         tur = o.get("toolUseResult")
                         if isinstance(tur, dict) and tur.get("agentId"):
                             # this result turn links its tool_use to a sub-agent
@@ -736,6 +768,8 @@ def parse_transcript(path):
                             "parts": parts}
                     if is_prompt:
                         turn["label"] = label[:200]
+                    if event:
+                        turn["event"] = event
                     turns.append(turn)
                 elif typ == "system":
                     # content-driven rule: render any system record with reader
@@ -1276,6 +1310,23 @@ TRANSCRIPT_PAGE = r"""<!DOCTYPE html>
   .turn.assistant{padding:0 14px 0 17px}
   .turn.toolio{padding:0 14px 0 17px}
   .turn.sys{padding:0 14px 0 17px}
+  /* harness-injected background-task notice — distinct card, not a prompt */
+  .turn.event{background:var(--panel);border:1px solid var(--line);
+    border-left:3px solid var(--accent);border-radius:10px;padding:9px 13px 11px;margin:6px 0}
+  .turn.event .thead{color:var(--accent)}
+  .xmlblock{margin:7px 0 0;padding:9px 11px;background:var(--bg);border:1px solid var(--line);
+    border-radius:8px;font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
+    white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;overflow:auto}
+  .xmlblock .xtag{color:var(--accent2)}
+  .xmlblock .xval{color:var(--txt)}
+  /* harness-injected prose (loop/scheduled prompts, skill preambles) — badged */
+  .turn.event.injected{border-left-color:var(--dim)}
+  .ihead{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+  .badge{flex:0 0 auto;font-size:10px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);
+    background:#1b1e2b;border:1px solid var(--line);border-radius:999px;padding:2px 8px}
+  .ihint{font-size:11px;color:var(--dim)}
+  .ibody{color:#c2c7dc}
+  .ibody .ptext{font-size:13.5px;line-height:1.55;color:#c2c7dc}
   .ptext{white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere}
   .fold{border:1px solid var(--line);border-radius:8px;background:var(--panel);margin:6px 0}
   .fold>summary{cursor:pointer;padding:6px 10px;font-size:12px;color:var(--dim);user-select:none;
@@ -1670,12 +1721,15 @@ function turnNode(t,anchor,ctx){
   ctx=ctx||{};
   const isPrompt=t.is_prompt;
   let cls='turn ';
-  if(t.role==='system')cls+='sys';
+  if(t.event)cls+='event'+(t.event==='injected'?' injected':'');
+  else if(t.role==='system')cls+='sys';
   else if(isPrompt)cls+='prompt';
   else if(t.role==='assistant')cls+='assistant';
   else cls+='toolio';
   const d=el('article',cls);
   if(anchor)d.id='t'+t.i;
+  if(t.event==='task_notification'){taskNotifNode(d,t);return d;}
+  if(t.event==='injected'){injectedNode(d,t);return d;}
   if(t.role==='system'){
     const label='◈ '+(t.subtype||'system').replace(/_/g,' ')+(t.ts?' · '+hhmm(t.ts):'');
     const text=(t.parts||[]).map(p=>p.text||'').join('\n');
@@ -1713,6 +1767,70 @@ function turnHead(label,t){
   const h=el('div','thead');h.appendChild(el('span','tlabel',label));
   const rt=rawText(t);if(rt)h.appendChild(copyBtn(()=>rt));  // copy the turn's raw text
   return h;
+}
+
+// A harness-injected background-task notice (not a human prompt). Raw content is
+// kept verbatim but split for readability: the leading <task-notification> XML
+// metadata block is pretty-printed with coloured tags, and any Markdown body
+// after the closing tag renders as Markdown (the same renderer as assistant text).
+function taskNotifNode(d,t){
+  const raw=rawText(t);
+  const close='</task-notification>';
+  const i=raw.indexOf(close);
+  const xml=(i===-1?raw:raw.slice(0,i+close.length)).trim();
+  const body=(i===-1?'':raw.slice(i+close.length)).trim();
+  const status=(xml.match(/<status>([^<]*)<\/status>/)||[])[1]||'';
+  d.appendChild(turnHead('⚙ background task'+(status?' · '+status:'')+(t.ts?' · '+hhmm(t.ts):''),t));
+  const pre=el('pre','xmlblock');xmlToPre(pre,xml);d.appendChild(pre);
+  if(body)d.appendChild(mdNode(body));
+}
+
+// A harness-injected prose turn (a /loop or scheduled prompt replayed on wake, a
+// skill preamble, "Continue…") — real content the user wants to read, but NOT
+// typed here, so it wears an "injected" badge instead of the human-prompt panel.
+// Content renders through partNode (plain, like a prompt body) so text/image/
+// document parts all show; nothing is dropped.
+function injectedNode(d,t){
+  const head=el('div','ihead');
+  head.appendChild(el('span','badge','injected'));
+  if(t.ts)head.appendChild(el('span','ihint',hhmm(t.ts)));
+  const rt=rawText(t);if(rt)head.appendChild(copyBtn(()=>rt));
+  d.appendChild(head);
+  const body=el('div','ibody');
+  (t.parts||[]).forEach(p=>body.appendChild(partNode(p,{})));
+  d.appendChild(body);
+}
+
+// Pretty-print an XML-ish snippet into `pre` as coloured spans, indented by
+// nesting depth. DOM-only (createElement/createTextNode) — no innerHTML — so the
+// untrusted tag/value text can never be parsed as HTML. An <open>text</close>
+// triple stays on one line; bare open tags indent their children.
+function xmlToPre(pre,xml){
+  const toks=[];const re=/<\/?[^>]*>/g;let last=0,m;
+  while((m=re.exec(xml))){
+    if(m.index>last){const s=xml.slice(last,m.index).trim();if(s)toks.push({k:'text',v:s});}
+    const rawTag=m[0];
+    let k='open';
+    if(rawTag.startsWith('</'))k='close';else if(rawTag.endsWith('/>'))k='self';
+    toks.push({k,v:rawTag});last=re.lastIndex;
+  }
+  if(last<xml.length){const s=xml.slice(last).trim();if(s)toks.push({k:'text',v:s});}
+  let depth=0,first=true;
+  const line=()=>{if(!first)pre.appendChild(document.createTextNode('\n'));
+    pre.appendChild(document.createTextNode('  '.repeat(depth)));first=false;};
+  const tag=v=>pre.appendChild(el('span','xtag',v));
+  const val=v=>pre.appendChild(el('span','xval',v));
+  for(let j=0;j<toks.length;j++){
+    const tk=toks[j];
+    if(tk.k==='close'){depth=Math.max(0,depth-1);line();tag(tk.v);continue;}
+    if(tk.k==='self'){line();tag(tk.v);continue;}
+    if(tk.k==='text'){line();val(tk.v);continue;}
+    // open tag: keep <open>text</close> or empty <open></close> on one line
+    if(toks[j+1]&&toks[j+1].k==='text'&&toks[j+2]&&toks[j+2].k==='close'){
+      line();tag(tk.v);val(toks[j+1].v);tag(toks[j+2].v);j+=2;continue;}
+    if(toks[j+1]&&toks[j+1].k==='close'){line();tag(tk.v);tag(toks[j+1].v);j+=1;continue;}
+    line();tag(tk.v);depth++;
+  }
 }
 
 function renderMeta(){

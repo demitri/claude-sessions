@@ -442,10 +442,10 @@ a turn is mounted.
   re-implement wrapper-stripping. Schema addition to the `turns[]` entries.
 - **`tool_reference` key is `tool_name`** **[verified]** (298 cases, all
   `{type, tool_name}`).
-- Harness-injected turns that are plain text but not human-typed (e.g.
-  `<task-notification>…` background-task events) classify as prompts — the
-  known-unknown side of the conservative rule; extend `WRAPPER_PREFIXES` only
-  with evidence, never speculatively.
+- Harness-injected turns that are plain text but not human-typed classify as
+  prompts — the known-unknown side of the conservative rule. Evidence arrived
+  (user spotted them in a transcript), so two are now handled — see
+  "Harness-injected user turns" below.
 - The `?agent=` response reuses the parent's `id` in `meta.id` (so page links
   stay stable) and adds `agent_id`/`agent_type`/`description`; `resume` is `""`
   for sub-agent transcripts (not resumable) and the page hides the button.
@@ -537,3 +537,46 @@ corpus-independent — garbled/pasted content triggers them, no adversary needed
   blanking the rest. (Surfacing, not silent-skipping — the raw text stays
   visible.) Verified: 5000 `>` + 100k `[` render in <1 s and the next normal turn
   still renders.
+
+## Harness-injected user turns (user-directed, 2026-07-03)
+
+Not every `role:"user"` turn is human-typed. Claude Code injects synthetic
+user-role turns for its own machinery, and the earlier prompt classifier
+(`extract_human_prompt`) painted them as human prompts (blue serif panel + a nav
+entry). The user spotted two in the wild — this is the "evidence" the build note
+above deferred to. **Corpus-verified 2026-07-03**, two distinct classes with
+*different* discriminators:
+
+- **`task_notification`** — a background-task completion notice
+  (`Bash(run_in_background)` or a background `Agent`/`Task` finishing).
+  **Structurally detectable:** content opens with the literal `<task-notification>`
+  tag. Shape: an XML metadata block (`<task-id>`, `<tool-use-id>`, `<output-file>`,
+  `<status>`, `<summary>`), closed by `</task-notification>`, **optionally followed
+  by a Markdown body** (a sub-agent's final message; background-`Bash` notices are
+  XML-only with just a `<summary>`). Handled: `_harness_event(content)` → `turn.event
+  = "task_notification"`, `is_prompt=False` (kept in the transcript, dropped from the
+  nav). Rendered by `taskNotifNode`/`xmlToPre` as a distinct `.turn.event` card —
+  the XML pretty-printed with depth indentation and **coloured tags** (`.xtag`
+  accent2 / `.xval` text), the trailing body through `mdNode`. **DOM-only** (no
+  `innerHTML`): nested tag-like text in a value becomes an inert `.xtag` span, never
+  HTML (XSS-probed). Raw content stays copyable verbatim via the header `⧉ copy`.
+
+- **Loop / queued re-injected prompts** → `event="injected"` (e.g. a `/loop` task
+  prompt replayed each iteration, a scheduled-agent wake prompt, "Continue from
+  where you left off", skill preambles). These are **arbitrary prose — NOT
+  content-detectable** without a fragile prefix match. The out-of-band
+  discriminator is the **top-level `isMeta:True`** field: 382 such user turns in the
+  corpus (bucketed 2026-07-03: 184 `local-command-caveat`, 88 skill-preamble, 68
+  `system-reminder`, 41 scheduled/loop-resume prose + skill preambles, 1
+  "Continue…"), and every one is harness-injected — none freshly-typed. `isMeta` is
+  the *general* mechanization (anti-whack-a-mole vs. growing `WRAPPER_PREFIXES`
+  prose prefixes). **Wired 2026-07-03**, with a load-bearing safety gate: reclassify
+  to `injected` **only when the turn was already `is_prompt=True`**. That targets
+  exactly the "injected prose masquerading as a human prompt" bug and structurally
+  excludes `isMeta` turns that carry a `tool_result` (never a prompt) — so no tool
+  output can be dropped. Corpus-verified: 130 turns reclassified, **0** still in the
+  nav, **0** carrying a `tool_result`. The wrapper-only `isMeta` turns
+  (`system-reminder`/`local-command-caveat`, already `is_prompt=False`) are left
+  untouched — they never read as prompts. Rendered by `injectedNode` as a
+  `.turn.event.injected` card with an **"injected" badge**; content goes through
+  `partNode` (plain, like a prompt body) so text/image/document parts all survive.
