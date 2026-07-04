@@ -1783,6 +1783,10 @@ function taskNotifNode(d,t){
   d.appendChild(turnHead('⚙ background task'+(status?' · '+status:'')+(t.ts?' · '+hhmm(t.ts):''),t));
   const pre=el('pre','xmlblock');xmlToPre(pre,xml);d.appendChild(pre);
   if(body)d.appendChild(mdNode(body));
+  // no-silent-skip: the xml/body split above is derived from the text parts; any
+  // non-text part (image/document/tool_result) goes through the shared dispatcher
+  // too, so a task_notification turn can never drop content it happens to carry.
+  (t.parts||[]).filter(p=>p.kind!=='text').forEach(p=>d.appendChild(partNode(p,{})));
 }
 
 // A harness-injected prose turn (a /loop or scheduled prompt replayed on wake, a
