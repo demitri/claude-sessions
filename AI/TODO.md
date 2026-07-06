@@ -14,6 +14,12 @@ Open ideas (none blocking; v1 works):
       chose eager render for v1); append-on-poll live refresh (v1 is a
       load-time snapshot + manual ↻); `include_media=off` escape hatch only if
       a pathological session appears.
+- [ ] **squad integration** — optional inter-session messaging surface
+      (transcript / tasks / roster pages over squad's SQLite bus, agent↔session
+      transcript links, phase-2 browser participation). **Silent absence: zero
+      UI change when no `.squad/` workspace exists.** Design in `AI/squad.md`
+      — written 2026-07-05, needs review rounds (codex → sonnet → opus) before
+      build. Product stance: claude-sessions is the product; squad is a feature.
 - [ ] **Copy-all-resume** button — one click to copy every visible (filtered)
       session's resume command, for fast post-reboot restoration.
 - [ ] **Context-window column** — `ctx_tokens` is already parsed; surface it

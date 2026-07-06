@@ -35,6 +35,14 @@ recovery console.
   the embedded SPA, gotchas.
 - `AI/remote.md` — design (not yet built) for aggregating sessions from other
   servers via an SSH-pipe `--emit` role, hub merge, and adaptive polling.
+- `AI/session-ipc-research.md` — background research for squad: notification
+  paths, inter-session IPC cost model (one model invocation per message),
+  ecosystem survey, and the 2026-07-05 two-session squad validation trial.
+- `AI/squad.md` — design (not yet built, not yet reviewed) for optional
+  [squad](https://github.com/mco-org/squad) integration: view/search the
+  inter-session message bus, task lifecycles, agent↔session links. Hard rule:
+  **silently absent** when no `.squad/` workspace exists (sanctioned exception
+  to no-silent-skip; data-presence gate, not error suppression).
 - `AI/transcript.md` — the per-session history/reader page (**built 2026-07-02**):
   separate linkable `/session?id=[&agent=]` route, full conversation, search
   (scope toggle), distinct user/assistant turns, prompt-jump navigator,
