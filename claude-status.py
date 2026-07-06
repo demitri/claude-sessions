@@ -20,6 +20,7 @@ import contextlib
 import fcntl
 import glob
 import gzip
+import html
 import json
 import os
 import re
@@ -147,6 +148,17 @@ NAMED_RE = re.compile(r'named this session "([^"]+)"')
 WRAPPER_PREFIXES = ("<system-reminder>", "<local-command", "<command-name>",
                     "<command-message>", "Caveat:", "<local-command-caveat>")
 
+
+def _named_title(txt):
+    """Extract a /name-style session title from user text.
+
+    Claude Code's own `named this session "..."` stdout wrapper HTML-escapes
+    the title before writing it to the transcript, so decode entities here
+    (once, at the source) rather than at render time — otherwise the
+    dashboard's client-side esc() double-escapes it."""
+    m = NAMED_RE.search(txt)
+    return html.unescape(m.group(1)) if m else None
+
 # cache: path -> (mtime, size, parsed_dict)
 _CACHE = {}
 
@@ -254,9 +266,7 @@ def parse_session(path):
                     user_msgs += 1
                     txt = _first_text(msg.get("content"))
                     if title is None:
-                        m = NAMED_RE.search(txt)
-                        if m:
-                            title = m.group(1)
+                        title = _named_title(txt)
                     if not preview_locked:
                         cleaned = _clean_preview(txt)
                         if cleaned and not cleaned.startswith(WRAPPER_PREFIXES):
@@ -738,9 +748,7 @@ def parse_transcript(path):
                     if typ == "user":
                         user_msgs += 1
                         if title is None:
-                            m = NAMED_RE.search(_first_text(content))
-                            if m:
-                                title = m.group(1)
+                            title = _named_title(_first_text(content))
                         is_prompt, label = extract_human_prompt(content, parts)
                         event = _harness_event(content)
                         if not event and o.get("isMeta") is True and is_prompt:
@@ -894,6 +902,12 @@ PAGE = r"""<!DOCTYPE html>
   button{cursor:pointer}
   button:hover,.chip:hover{border-color:var(--accent2)}
   .count{color:var(--dim);font-size:12px;margin-left:6px}
+  .refresh-sm{margin-left:8px;padding:3px 8px;vertical-align:middle}
+  .ramchip{cursor:default;font-variant-numeric:tabular-nums;font-weight:650;
+    color:#fff;border-color:var(--accent);background:linear-gradient(180deg,#2a2030,#1d1822)}
+  .ramchip.warn{color:var(--amber);border-color:var(--amber);background:rgba(245,179,74,.18)}
+  .ramchip.critical{color:var(--red);border-color:var(--red);background:rgba(239,91,107,.22);animation:pulse-red 1.6s infinite}
+  @keyframes pulse-red{0%{box-shadow:0 0 0 0 rgba(239,91,107,.55)}70%{box-shadow:0 0 0 6px rgba(239,91,107,0)}100%{box-shadow:0 0 0 0 rgba(239,91,107,0)}}
   table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
   th,td{text-align:left;padding:11px 13px;border-bottom:1px solid var(--line);vertical-align:top}
   th{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--dim);cursor:pointer;user-select:none;white-space:nowrap;position:sticky;top:0;background:#10121b;z-index:2}
@@ -960,11 +974,11 @@ PAGE = r"""<!DOCTYPE html>
       <div class="logo">C</div>
       <div>
         <h1>Claude Sessions</h1>
-        <div class="sub"><span id="sub">scanning…</span><span class="count" id="count"></span></div>
+        <div class="sub"><span id="sub">scanning…</span><span class="count" id="count"></span><button id="refresh" class="copy refresh-sm" title="Refresh now">↻</button></div>
       </div>
     </div>
     <div class="chips">
-      <button id="refresh">↻ Refresh</button>
+      <span class="chip ramchip" id="ramchip" title="Total RSS of open Claude sessions"></span>
       <label class="chip"><input type="checkbox" id="group" style="margin-right:6px">Group by project</label>
     </div>
   </header>
@@ -1186,12 +1200,11 @@ function cards2(){
   let live=s.filter(x=>now()-x.updated_ts<900).length;
   let flagged=s.filter(x=>x.flagged).length;
   let done=s.filter(x=>x.done).length;
-  let ramkb=s.reduce((a,x)=>a+(x.rss_kb||0),0);
   let projs=new Set(s.map(x=>x.project)).size;
   let msgs=s.reduce((a,x)=>a+x.msgs,0);
   let tok=s.reduce((a,x)=>a+x.out_tokens,0);
   let size=s.reduce((a,x)=>a+x.size_bytes,0);
-  let S=[[s.length,'sessions'],[open,'open'],[live,'live ·15m'],[flagged,'flagged'],[done,'done'],[ram(ramkb),'ram·open'],
+  let S=[[s.length,'sessions'],[open,'open'],[live,'live ·15m'],[flagged,'flagged'],[done,'done'],
     [projs,'projects'],[msgs.toLocaleString(),'msgs'],[ktok(tok),'out tok'],[bytes(size),'on disk']];
   $('#cards2').innerHTML=S.map(x=>`<span class="stat"><b>${x[0]}</b><i>${x[1]}</i></span>`).join('');
 }
@@ -1202,10 +1215,24 @@ function fillProjects(){
   sel.innerHTML='<option value="">All projects</option>'+ps.map(p=>`<option ${p===cur?'selected':''}>${esc(p)}</option>`).join('');
 }
 
+// thresholds for the header RAM chip's "excessive" background tint — total
+// RSS across open Claude sessions, not system-wide (the OS has its own
+// memory-pressure indicator for that)
+const RAM_WARN_KB=3*1024*1024, RAM_CRIT_KB=6*1024*1024;
+function ramChip(list){
+  let kb=list.reduce((a,x)=>a+(x.rss_kb||0),0);
+  let el=$('#ramchip');
+  el.classList.remove('warn','critical');
+  if(kb>=RAM_CRIT_KB)el.classList.add('critical');
+  else if(kb>=RAM_WARN_KB)el.classList.add('warn');
+  el.textContent=ram(kb)+' Claude RAM';
+}
+
 async function load(){
   let r=await fetch('api/sessions?t='+Date.now());let j=await r.json();
   DATA=j.sessions;generated=j.generated;
   $('#sub').textContent='Updated '+stamp(generated);
+  ramChip(DATA);
   cards2();fillProjects();renderFavs();render();
 }
 

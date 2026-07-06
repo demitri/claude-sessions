@@ -45,7 +45,29 @@ session is opened/closed). `lsof` is *not* usable here: Claude appends to the
 `<pid>.json` also gives **per-session RAM**: `open_sessions()` batches one `ps -o
 pid=,rss= -p …` call and attaches `rss_kb` to each open session (closed → 0).
 RSS over-counts shared pages, so totals are an upper-ish bound on reclaimable
-memory. Surfaced as a "RAM" column and a "RAM · open" card.
+memory. Surfaced as a "RAM" column and, summed across all loaded sessions, as
+the header RAM chip (below) — this is entirely client-side arithmetic over
+`rss_kb`, no separate backend endpoint.
+
+### Header RAM chip
+
+`#ramchip` (header row, left of "Group by project") shows total RSS across all
+loaded Claude sessions (open only — closed sessions contribute 0), e.g. "1.7 GB
+Claude RAM". `ramChip(DATA)` (in `load()`, same 30s cadence as everything else)
+sums `rss_kb` and tints the chip's *background* at two thresholds —
+`RAM_WARN_KB`/`RAM_CRIT_KB`, currently 3GB/6GB (`.ramchip.warn`/`.ramchip.critical`;
+critical also pulses via the same `@keyframes` pattern as the busy-session dot).
+
+This is deliberately **not** system-wide RAM or OS memory pressure — the point
+is "are my own Claude sessions using a lot of memory," a number the OS's own
+memory-pressure indicator can't tell you. The 3GB/6GB thresholds are a starting
+guess (picked with no strong evidence, per the user 2026-07-03), not derived
+from anything — expect to retune `RAM_WARN_KB`/`RAM_CRIT_KB` (single constants,
+top of the `<script>` block) if they don't match real usage patterns.
+
+The refresh button lives next to the session `#count` (in `.sub`) as a small
+icon-only button (`.copy.refresh-sm`), moved out of the header chips row to
+make room for the RAM chip.
 
 ### Per-session marks (flag / done)
 
