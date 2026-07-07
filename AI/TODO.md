@@ -24,9 +24,6 @@ Open ideas (none blocking; v1 works):
       session's resume command, for fast post-reboot restoration.
 - [ ] **Context-window column** — `ctx_tokens` is already parsed; surface it
       (e.g. latest context size, maybe as a % of the model's window).
-- [ ] **README screenshot** — capture the dashboard (run it, screenshot, commit
-      as e.g. `docs/screenshot.png`) and embed near the top of `README.md`;
-      the repo is public now and a visual tool sells itself with a picture.
 - [ ] **Auto-start on login** — a LaunchAgent plist so the dashboard is always up
       at `127.0.0.1:7878`.
 - [ ] Consider a `--restore-sheet` mode that writes the markdown restore sheet
@@ -40,6 +37,13 @@ Open ideas (none blocking; v1 works):
 
 ## Done
 
+- [x] **Public-facing polish** (2026-07-07) — rewrote `README.md` for an outside
+      audience (hook, feature list, quick-start clone, privacy note), added
+      `LICENSE` (MIT), and embedded `docs/screenshot.png` near the top. The
+      screenshot is generated from **fabricated** data (no private repos) by
+      `tools/make_fixture.py`, which builds an isolated `$HOME` of invented
+      sessions + live RAM-holding helpers; re-run it to refresh the shot when the
+      UI changes.
 - [x] First git commit + remote (2026-07-03) — public repo at
       `github.com:demitri/claude-sessions`.
 - [x] **Session transcript viewer** (2026-07-02) — `/session?id=[&agent=]` page:

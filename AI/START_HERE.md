@@ -30,7 +30,13 @@ recovery console.
 ## Where things are
 
 - `claude-status.py` — server + dashboard (see `AI/dashboard.md` for internals).
-- `README.md` — user-facing usage.
+- `README.md` — public-facing usage (screenshot, features, quick-start). `LICENSE`
+  is MIT.
+- `docs/screenshot.png` — the README hero image, generated from **fabricated**
+  data (no private repos) by `tools/make_fixture.py`: it builds an isolated
+  `$HOME` of invented sessions (+ live RAM-holding helper processes so the RAM
+  column/chip look real), which you serve via `HOME=… claude-status.py`. Re-run
+  it to refresh the screenshot when the UI changes; see the script's docstring.
 - `AI/dashboard.md` — implementation details: session-file parsing, data model,
   the embedded SPA, gotchas.
 - `AI/remote.md` — design (not yet built) for aggregating sessions from other

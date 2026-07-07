@@ -1,82 +1,104 @@
 # claude-sessions
 
-A local dashboard for your Claude Code sessions. Scans `~/.claude/projects/` and
-serves a sortable, filterable web page showing your sessions grouped by project
-directory, with per-session stats and one-click resume commands.
+**A local dashboard for your Claude Code sessions.** Point it at `~/.claude`,
+open the page, and see every session grouped by project — with live status,
+stats, a full transcript reader, and one-click resume.
 
-Runs on the Python 3 standard library — no install step required (tested on
-3.13; any recent Python 3 should work). Third-party packages are allowed where
-one clearly earns its place, but stdlib stays the default so "just run it"
-keeps working.
+No install, no dependencies, no daemon. It's a single Python file that runs on
+the standard library. `python3 claude-status.py` and you're looking at it.
 
-## Run
+<p align="center">
+  <img src="docs/screenshot.png" alt="The claude-sessions dashboard: sessions grouped by project with status dots, stats, and resume buttons" width="900">
+</p>
+
+## Why
+
+Claude Code persists every session to `~/.claude/projects/*/*.jsonl`, but there's
+no built-in way to see them all at once. This project was born from a disk-full
+incident with 10+ open sessions that needed to survive a reboot — the on-disk
+history made the working set recoverable, and this dashboard turns that state
+into a live console for finding, triaging, and resuming your work.
+
+## Features
+
+- **Everything at a glance** — every session grouped by project directory, with
+  start time, last-active (colour-coded by recency), message counts, model, git
+  branch, output tokens, and on-disk size.
+- **Live status** — a coloured dot per session: green for open, pulsing for
+  busy, grey for closed — detected from the running Claude processes, not
+  guessed from file mtimes.
+- **One-click resume** — the ⧉ button copies `cd "<dir>" && claude --resume <id>`
+  straight to your clipboard.
+- **Transcript reader** — a **view** link opens the full conversation on its own
+  linkable page: distinct user/assistant turns, collapsed tool-calls and
+  thinking, in-transcript search, a prompt-jump sidebar, and lazy sub-agent
+  expansion.
+- **Reboot survival** — ⚑ flag the sessions you're not done with, restart, filter
+  to "Flagged", and resume them. Marks persist server-side across reboots and
+  browsers.
+- **Filter & sort** — free-text search (project / title / message / branch / id /
+  model), a project dropdown, recency chips, and sortable columns.
+- **Memory footprint** — a per-session RAM column and a header chip totalling how
+  much memory your open sessions are holding — a number the OS can't tell you.
+- **`/done` in a session** — mark the current session complete so it drops out of
+  the default view; pairs naturally with `/exit`.
+
+## Requirements
+
+Python 3 with the standard library. That's it — no `pip install`. Tested on
+Python 3.13; any recent Python 3 should work. macOS and Linux.
+
+## Quick start
 
 ```bash
-python3 claude-status.py            # serve on http://127.0.0.1:7878 and open a browser
-python3 claude-status.py --port 9000
-python3 claude-status.py --no-open  # don't auto-open the browser
-python3 claude-status.py --once     # write a static index.html snapshot and exit
-python3 claude-status.py --done     # mark the current session "done" and exit
+git clone https://github.com/demitri/claude-sessions.git
+cd claude-sessions
+python3 claude-status.py
 ```
 
-An example **`/done` slash command** ships in `commands/done.md` — copy it to
-`~/.claude/commands/done.md` and set the path to your checkout (see the install
-note at the top of the file). It marks the **current** session complete so it
-drops out of the dashboard's default view — type `/done` then `/exit` to close
-out a finished session in one gesture. It reads `$CLAUDE_CODE_SESSION_ID`, so it
-takes no argument. (Setting done also
-clears any "reopen" flag — done means nothing's pending.) The raw CLI also accepts
-an optional session id or the statusline's last-4 — `python3 claude-status.py
---done 6789` — for marking a session done from a plain terminal, outside any
-session. The running dashboard picks the mark up on its next refresh (it reloads
-`flags.json` when the file changes).
+This serves the dashboard on <http://127.0.0.1:7878> and opens your browser.
 
-The server rescans `~/.claude/projects/` on every request (results are cached per
-file by mtime+size), and the page auto-refreshes every 30 s.
+```bash
+python3 claude-status.py --port 9000   # serve on a different port
+python3 claude-status.py --no-open     # don't auto-open the browser
+python3 claude-status.py --once        # write a static index.html snapshot and exit
+python3 claude-status.py --done        # mark the current session "done" and exit
+```
 
-## What it shows
+The server rescans `~/.claude/projects/` on every request (cached per file by
+mtime + size), and the page auto-refreshes every 30 seconds.
 
-- **Summary cards** — total sessions, Live (≤15m), Active (≤2h), projects,
-  messages, output tokens, on-disk size.
-- **Sortable table** — click any column header; click again to reverse.
-- **Filters** — free-text search (project / title / message / branch / id /
-  model), a project dropdown, and status chips (All · Live · Active · Today,
-  defaulting to Today).
-- **Group-by-project** toggle — per-project sections with counts and token
-  subtotals.
-- **Per-session stats** — start time, last-active (relative, colour-coded by
-  recency), user/assistant message split, output tokens, model, git branch, file
-  size, RAM (for open sessions), and the first real user message as a preview.
-- **Open vs closed** — the leading dot shows live state (green open · pulsing
-  busy · grey closed), detected from the running Claude processes; an "Open"
-  toggle and count filter to live sessions.
-- **Reboot survival** — ⚑ flag the sessions you're not done with, then after a
-  restart filter to "Flagged" and resume them. ✕ mark sessions you're finished
-  with as *done* (hidden by default; "✕ Done" reveals them). Both marks persist
-  server-side across reboots and browsers.
-- **⧉ resume** — copies `cd "<dir>" && claude --resume <id>` to the clipboard.
+## The `/done` slash command
 
-## Transcript reader
+An example `/done` command ships in `commands/done.md`. Copy it to
+`~/.claude/commands/done.md` and set the checkout path (see the note at the top
+of the file). It marks the **current** session complete — reading
+`$CLAUDE_CODE_SESSION_ID`, so it takes no argument — dropping it from the
+dashboard's default view. Type `/done` then `/exit` to close out a finished
+session in one gesture.
 
-Every session row has a **view** link that opens the full conversation on its
-own linkable page (`/session?id=<id>`):
+The raw CLI also accepts an optional session id or the statusline's last-4
+(`python3 claude-status.py --done 6789`) for marking a session done from a plain
+terminal, outside any session. A running dashboard picks the mark up on its next
+refresh.
 
-- User and assistant turns rendered distinctly, with tool calls and thinking
-  blocks collapsed behind one-line summaries — expand only what you care about.
-- **Search** across the transcript, with a scope toggle (prompts only vs
-  everything).
-- **Prompt-jump navigator** — a sidebar of your prompts for skipping straight
-  to any point in the conversation.
-- **Sub-agents panel** — sessions that spawned sub-agents list them for lazy
-  expansion, and each sub-agent transcript is linkable too
-  (`/session?id=<id>&agent=<agentId>`).
+## How it works
 
-## Why it exists
+Everything lives in `claude-status.py` — a stdlib `ThreadingHTTPServer` backend
+and a single embedded HTML/CSS/JS page, no build step and no framework. The
+backend scans `~/.claude/projects/*/*.jsonl`, parses each session defensively
+(the format is an undocumented Claude Code internal, so malformed *lines* are
+skipped, never whole files), and serves the data as JSON. Live status comes from
+`~/.claude/sessions/<pid>.json`, cross-checked against the running processes.
 
-Born from a disk-full incident with 10+ open Claude sessions that needed to
-survive a reboot. Claude Code persists every session to `~/.claude/projects/*/*.jsonl`,
-so the working set can be reconstructed after a restart — this dashboard turns
-that on-disk state into a live console for finding and resuming sessions.
+For a deeper tour, see [`AI/dashboard.md`](AI/dashboard.md); for orientation,
+[`AI/START_HERE.md`](AI/START_HERE.md).
 
-See `AI/START_HERE.md` for orientation and `AI/dashboard.md` for implementation
-details.
+## Privacy
+
+Everything runs locally and binds to `127.0.0.1`. Nothing is sent anywhere — the
+dashboard only reads the session files Claude Code already wrote to your disk.
+
+## License
+
+[MIT](LICENSE) © Demitri Muna
