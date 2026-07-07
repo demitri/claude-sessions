@@ -42,8 +42,9 @@ Open ideas (none blocking; v1 works):
       `LICENSE` (MIT), and embedded `docs/screenshot.png` near the top. The
       screenshot is generated from **fabricated** data (no private repos) by
       `tools/make_fixture.py`, which builds an isolated `$HOME` of invented
-      sessions + live RAM-holding helpers; re-run it to refresh the shot when the
-      UI changes.
+      sessions, runs `--once`, and injects open-state + RAM into the inlined
+      JSON (no live process / no real RAM) → `demo.html`; re-run it to refresh
+      the shot when the UI changes.
 - [x] First git commit + remote (2026-07-03) — public repo at
       `github.com:demitri/claude-sessions`.
 - [x] **Session transcript viewer** (2026-07-02) — `/session?id=[&agent=]` page:

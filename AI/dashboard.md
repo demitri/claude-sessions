@@ -162,9 +162,13 @@ session-init record carries it; `"cli"` = interactive, `"sdk-cli"` = headless).
 
 ### Retention
 
-Claude Code prunes transcripts older than `cleanupPeriodDays` (**default 30**,
-unset here) on startup — so the corpus is a rolling ~30-day window, not infinite
-history. Untouched sessions age out on their own.
+Claude Code prunes transcripts older than `cleanupPeriodDays` (**default 20**,
+per the [settings docs](https://code.claude.com/docs/en/settings)) on startup —
+so with the default the corpus is a rolling ~20-day window and untouched sessions
+age out on their own. It's a knob, though: this dev's machine sets it to `99999`
+(effectively never), so **don't assume the window is bounded** — read the actual
+value from settings before relying on it (this is what the purge-warning idea in
+`AI/TODO.md` keys on).
 
 ## Per-session data model (`parse_session` → JSON)
 

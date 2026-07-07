@@ -1,33 +1,41 @@
 #!/usr/bin/env python3
-"""Generate a throwaway ~/.claude tree of *fabricated* Claude Code sessions so
+"""Generate a self-contained demo page of *fabricated* Claude Code sessions so
 the dashboard can be screenshotted (docs/screenshot.png) with zero real or
-private data.
+private data — and without spawning processes or holding real RAM.
 
-Everything here is invented — project names, prompts, ids. It writes into an
-isolated $FIXTURE_HOME, then you point the dashboard at that HOME:
+Everything here is invented — project names, prompts, ids, RAM figures. The
+approach:
 
+  1. Write an isolated $FIXTURE_HOME/.claude tree of invented session files.
+  2. Run `claude-status.py --once` against that HOME to produce the real static
+     page (reusing the app's own write_static(), so the HTML never drifts from
+     the live dashboard when the UI changes).
+  3. Inject open-state + RAM numbers straight into the page's inlined JSON.
+     Those fields (open / live_status / rss_kb) are normally process-derived;
+     faking them in the data is what lets the RAM column, the header RAM chip,
+     and the green/pulsing "open" dots render without any live Claude process.
+
+Output: $FIXTURE_HOME/demo.html — open it in a browser and screenshot. It's a
+plain file:// page: no server, no processes, nothing to kill afterward.
+
+Usage:
     cd tools
     FIXTURE_HOME="$PWD/fixture-home" python3 make_fixture.py
-    HOME="$PWD/fixture-home" python3 ../claude-status.py --port 7900
+    open "$PWD/fixture-home/demo.html"     # then screenshot -> docs/screenshot.png
 
-Because claude-status.py resolves PROJECTS/SESSIONS/FLAGS through
-os.path.expanduser("~/..."), overriding $HOME fully isolates it from your real
-~/.claude. Regenerate whenever the dashboard's look changes and a fresh
-screenshot is needed.
-
-The script also spawns a few short-lived helper processes that hold real RAM
-(and touch every page so it's actually resident) with matching
-~/.claude/sessions/<pid>.json files, so the RAM column and header chip render
-realistic numbers. It prints the pids and the `kill` line to stop them.
+Re-run whenever the dashboard's look changes and a fresh screenshot is needed.
 """
 import json, os, sys, random, subprocess
 from datetime import datetime, timezone, timedelta
 
 HOME = os.path.abspath(os.environ.get("FIXTURE_HOME", "fixture-home"))
 PROJECTS = os.path.join(HOME, ".claude", "projects")
-SESSIONS = os.path.join(HOME, ".claude", "sessions")
 CONFIG = os.path.join(HOME, ".config", "claude-sessions")
-for d in (PROJECTS, SESSIONS, CONFIG):
+APP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "claude-status.py")
+# write_static() always writes index.html next to claude-status.py:
+STATIC_OUT = os.path.join(os.path.dirname(os.path.abspath(APP)), "index.html")
+DEMO_OUT = os.path.join(HOME, "demo.html")
+for d in (PROJECTS, CONFIG):
     os.makedirs(d, exist_ok=True)
 
 rnd = random.Random(1234)  # deterministic fixture
@@ -60,14 +68,12 @@ SPEC = [
     ("data-pipeline",   "main",            None,                 "Document the schema for the events table and add a freshness check.", 6, 6, 17400, 1, 1180),
 ]
 
-# which rows are "open" (index -> status); those get a live process + RAM
-OPEN = {0: "busy", 1: "idle", 2: "idle"}
-# hold real, resident RAM so the RAM column / header chip look realistic (MB)
-RAM_MB = {0: 420, 1: 360, 2: 300}
+# index -> (live_status, rss_MB): the "open" sessions and their fabricated RAM.
+OPEN = {0: ("busy", 420), 1: ("idle", 360), 2: ("idle", 300)}
 FLAG_ROWS = {1, 5}   # ⚑ flagged (reboot-survival demo)
 
-live_pids = []
 sids = []
+inject = {}   # session id -> {"open", "live_status", "rss_kb"}
 for i, (proj, branch, title, prompt, nu, na, out_tok, mi, mins) in enumerate(SPEC):
     cwd = "%s/%s" % (BASE, proj)
     s = sid(); sids.append(s)
@@ -105,38 +111,42 @@ for i, (proj, branch, title, prompt, nu, na, out_tok, mi, mins) in enumerate(SPE
             fh.write(json.dumps(o) + "\n")
 
     if i in OPEN:
-        mb = RAM_MB[i]
-        # Hold memory that actually stays resident in `ps -o rss=` (what the
-        # dashboard reads). Two OS behaviours fight this: a zero-filled buffer
-        # gets collapsed (macOS memory compressor / Linux shared zero page),
-        # and *idle* pages get evicted/swapped even when incompressible. So:
-        # fill with incompressible os.urandom AND keep the pages hot with a
-        # cheap strided re-read once a second (one access per 4 KB page marks
-        # it recently-used → not reclaimed; ~size/4096 reads/s, negligible CPU).
-        code = ("import os, time\n"
-                "x = os.urandom(%d * 1024 * 1024)\n"
-                "while True:\n"
-                "    s = 0\n"
-                "    for i in range(0, len(x), 4096): s += x[i]\n"
-                "    time.sleep(1)\n") % mb
-        # Detach (own session, no inherited stdio) so the helper never holds a
-        # parent pipe open — otherwise a wrapping shell can hang on it.
-        proc = subprocess.Popen([sys.executable, "-c", code],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                stdin=subprocess.DEVNULL, start_new_session=True)
-        pid = proc.pid
-        live_pids.append(pid)
-        with open(os.path.join(SESSIONS, "%d.json" % pid), "w") as fh:
-            json.dump({"pid": pid, "sessionId": s, "cwd": cwd,
-                       "status": OPEN[i], "kind": "cli", "name": title or ""}, fh)
+        status, mb = OPEN[i]
+        inject[s] = {"open": True, "live_status": status, "rss_kb": mb * 1024}
 
 # flags.json (⚑ flagged rows: key present = mark set)
 flags = {sids[i]: {"flag": iso(now)} for i in FLAG_ROWS}
 with open(os.path.join(CONFIG, "flags.json"), "w") as fh:
     json.dump(flags, fh)
 
-print("FIXTURE_HOME=%s" % HOME)
-print("sessions: %d   open(with RAM): %d   flagged: %d" % (len(SPEC), len(live_pids), len(FLAG_ROWS)))
-print("\nServe it:\n  HOME=%s python3 ../claude-status.py --port 7900" % HOME)
-print("\nStop the RAM-holding helper processes when done:\n  kill %s"
-      % " ".join(str(p) for p in live_pids))
+# --- render the real static page via the app's own write_static(), then inject.
+env = dict(os.environ, HOME=HOME)
+subprocess.run([sys.executable, APP, "--once", "--no-open"], env=env, check=True)
+html = open(STATIC_OUT, encoding="utf-8").read()
+os.remove(STATIC_OUT)  # don't leave a snapshot in the repo tree
+
+# The page inlines the dataset as `let j=<json>;`. Parse exactly that JSON
+# object (raw_decode finds its end), rewrite the fabricated fields, splice back.
+i = html.index("let j=") + len("let j=")
+data, end = json.JSONDecoder().raw_decode(html, i)
+hit = 0
+for s in data["sessions"]:
+    patch = inject.get(s["id"])
+    if patch:
+        s.update(patch)
+        hit += 1
+if hit != len(inject):
+    raise SystemExit("inject: matched %d of %d open sessions (id mismatch?)" % (hit, len(inject)))
+html = html[:i] + json.dumps(data) + html[end:]
+# re-enable the per-row "view" links so the demo matches the live dashboard
+# (they're dead on file://, but never clicked in a screenshot).
+html = html.replace("const STATIC=true;", "const STATIC=false;")
+
+with open(DEMO_OUT, "w", encoding="utf-8") as fh:
+    fh.write(html)
+
+total_gb = sum(p["rss_kb"] for p in inject.values()) / 1024 / 1024
+print("\nsessions: %d   open+RAM: %d (%.2f GB)   flagged: %d"
+      % (len(SPEC), len(inject), total_gb, len(FLAG_ROWS)))
+print("demo page: %s" % DEMO_OUT)
+print("open it and screenshot -> docs/screenshot.png:\n  open %s" % DEMO_OUT)
