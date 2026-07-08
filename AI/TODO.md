@@ -31,12 +31,19 @@ Open ideas (none blocking; v1 works):
 
 ## Maybe pile (deferred, not now)
 
-- [ ] **Expires-in column** — show days until each session ages out of the
-      ~30-day `cleanupPeriodDays` retention window (so you can see what's about
-      to be auto-deleted). Deferred per user 2026-06-27.
+- [ ] _(none right now)_
 
 ## Done
 
+- [x] **Purge warnings** (2026-07-07) — surface sessions about to age out of the
+      `cleanupPeriodDays` retention window. `cleanup_period_days()` reads the
+      effective value (managed > user settings, default 20); `collect()` sets
+      `expires_ts = mtime + window` per session. A subtle `#purgenote` line under
+      the "Updated" header counts sessions `<48h` from purge (only the count
+      tinted; hint in tooltip); each row `<24h` out gets a `.purgewarn` line
+      (past-due → "purged on next Claude Code start"). Skips `done`. Verified
+      against an aged-mtime fixture (7.2h → warn, −9.6h → past-due, fresh → none)
+      + `node --check`. Supersedes the old "Expires-in column" idea.
 - [x] **Public-facing polish** (2026-07-07) — rewrote `README.md` for an outside
       audience (hook, feature list, quick-start clone, privacy note), added
       `LICENSE` (MIT), and embedded `docs/screenshot.png` near the top. The

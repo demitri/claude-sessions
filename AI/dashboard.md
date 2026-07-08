@@ -167,16 +167,33 @@ per the [settings docs](https://code.claude.com/docs/en/settings)) on startup �
 so with the default the corpus is a rolling ~20-day window and untouched sessions
 age out on their own. It's a knob, though: this dev's machine sets it to `99999`
 (effectively never), so **don't assume the window is bounded** — read the actual
-value from settings before relying on it (this is what the purge-warning idea in
-`AI/TODO.md` keys on).
+value from settings.
+
+**Purge warnings.** `cleanup_period_days()` resolves the effective value —
+managed (enterprise) `managed-settings.json` wins over `~/.claude/settings.json`,
+else the default 20. Per-project setting overrides are **not** merged (documented
+approximation: the real value is almost always user-level, and per-project would
+mean a settings read per session dir per scan). `collect()` computes it once and
+sets `expires_ts = mtime + cleanupPeriodDays·86400` on each session (using file
+**mtime** — the authoritative input to Claude Code's own age-based prune, not the
+last-record timestamp), plus a top-level `cleanup_period_days` in the response.
+The client surfaces this **quietly** (a rolling window means it's near-always
+present, so it's informational, not alarming): `purgeNote()` writes a second
+`.sub` line right under the "Updated …" header — dim text with only the **count**
+tinted amber (`#purgenote .pn`), counting sessions `<48h` from purge
+(`PURGE_WARN_H`); the resume-to-reset hint lives in its `title` tooltip. Each row
+`<24h` out (`PURGE_CRIT_H`) additionally gets a `.purgewarn` line under its prompt
+(past-due → a "will be purged on next Claude Code start" message). Both skip
+`done` sessions. With `cleanupPeriodDays` huge (e.g. 99999), `expires_ts` is far
+future and nothing shows — correct by construction.
 
 ## Per-session data model (`parse_session` → JSON)
 
 `id, cwd, project, title, preview, started_ts, updated_ts, msgs, user_msgs,
-asst_msgs, model, branch, version, entrypoint, size_bytes, out_tokens,
-ctx_tokens, resume` — plus `open`, `live_status`, `rss_kb`, `flagged`, and
-`done`, injected per request by `collect()` (see "Open vs closed sessions" and
-"Per-session marks").
+asst_msgs, model, branch, version, entrypoint, size_bytes, mtime, out_tokens,
+ctx_tokens, resume` — plus `open`, `live_status`, `rss_kb`, `flagged`, `done`,
+and `expires_ts`, injected per request by `collect()` (see "Open vs closed
+sessions", "Per-session marks", and "Purge warnings").
 
 - `project` — short name via `project_short()`: strips to the repo name, and
   keeps one parent for grouped families (`thehighlighter/…`, `trillianverse/…`).

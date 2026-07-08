@@ -37,6 +37,12 @@ from urllib.parse import parse_qs, urlsplit
 PROJECTS = os.path.expanduser("~/.claude/projects")
 SESSIONS = os.path.expanduser("~/.claude/sessions")  # <pid>.json per live process
 FLAGS_PATH = os.path.expanduser("~/.config/claude-sessions/flags.json")
+# Claude Code prunes transcripts whose file mtime is older than cleanupPeriodDays
+# (default 20 per the settings docs) on startup. We read the effective value to
+# warn about sessions about to age out.
+SETTINGS_USER = os.path.expanduser("~/.claude/settings.json")
+SETTINGS_MANAGED = "/Library/Application Support/ClaudeCode/managed-settings.json"
+DEFAULT_CLEANUP_DAYS = 20
 _flags_lock = threading.Lock()
 _flags_mtime = None  # mtime of flags.json at last load; drives refresh_flags()
 
@@ -313,6 +319,7 @@ def parse_session(path):
         "version": version or "",
         "entrypoint": entrypoint or "",
         "size_bytes": st.st_size,
+        "mtime": st.st_mtime,  # authoritative input to Claude Code's age-based prune
         "out_tokens": out_tokens,
         "ctx_tokens": ctx_tokens,
         "resume": resume,
@@ -409,12 +416,66 @@ def open_sessions():
     return out
 
 
+def _tilde(path):
+    home = os.path.expanduser("~")
+    return "~" + path[len(home):] if path.startswith(home) else path
+
+
+def cleanup_period_days():
+    """Effective `cleanupPeriodDays` → `(days, error)`. Claude Code deletes
+    transcripts whose file mtime is older than this many days, on startup.
+    Managed (enterprise) settings win over user settings; falls back to the
+    documented default (20).
+
+    `error` is None in the normal case (including the quiet, expected states: an
+    absent settings file, or a file without the key). It is a `{message, detail}`
+    dict when a settings file is genuinely broken — unreadable, not JSON, not an
+    object, or a present-but-invalid `cleanupPeriodDays` — so the UI can say so
+    loudly instead of quietly masking it with the default. We don't contort
+    around a broken file: we still fall back to a usable window AND report it.
+
+    Per-project overrides (a project's own `.claude/settings.json`) are NOT
+    merged here — a deliberate approximation: the real-world value is almost
+    always the user-level one, and merging per-project would mean a settings
+    read per session directory on every scan."""
+    error = None
+    for path in (SETTINGS_MANAGED, SETTINGS_USER):  # managed first = higher precedence
+        disp = _tilde(path)
+        try:
+            with open(path) as fh:
+                raw = json.load(fh)
+        except FileNotFoundError:
+            continue  # absent settings file is the normal case — stay quiet
+        except OSError as e:
+            error = error or {"message": "Can’t read %s" % disp, "detail": str(e)}
+            continue
+        except ValueError as e:  # malformed JSON
+            error = error or {"message": "%s is not valid JSON" % disp, "detail": str(e)}
+            continue
+        if not isinstance(raw, dict):
+            error = error or {"message": "%s is not a JSON object" % disp,
+                              "detail": "Top-level value is %s, expected an object." % type(raw).__name__}
+            continue
+        v = raw.get("cleanupPeriodDays")
+        if v is None:
+            continue  # key absent here — defer to a lower-precedence source / default
+        # bool is an int subclass, so guard it out explicitly
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+            error = error or {"message": "cleanupPeriodDays in %s is invalid" % disp,
+                              "detail": "Expected a positive number, found %r." % (v,)}
+            continue
+        return int(v), error  # a usable value still reports any earlier corruption
+    return DEFAULT_CLEANUP_DAYS, error
+
+
 def collect():
     with _flags_lock:
         refresh_flags()  # pick up external marks (e.g. `--done`) since last scan
         # snapshot under the lock so a concurrent POST can't mutate FLAGS mid-scan
         flags_snap = {sid: dict(m) for sid, m in FLAGS.items()}
     open_map = open_sessions()
+    cleanup_days, settings_error = cleanup_period_days()
+    prune_secs = cleanup_days * 86400
     sessions = []
     for f in glob.glob(os.path.join(PROJECTS, "*", "*.jsonl")):
         s = parse_session(f)
@@ -438,9 +499,13 @@ def collect():
         marks = flags_snap.get(s["id"], {})
         s["flagged"] = "flag" in marks
         s["done"] = "done" in marks
+        # when Claude Code will prune this transcript (mtime + window). Per
+        # request, not cached: the window can change without the file changing.
+        s["expires_ts"] = s["mtime"] + prune_secs
         sessions.append(s)
     sessions.sort(key=lambda s: s["updated_ts"], reverse=True)
-    return {"generated": time.time(), "sessions": sessions}
+    return {"generated": time.time(), "sessions": sessions,
+            "cleanup_period_days": cleanup_days, "settings_error": settings_error}
 
 
 # ---------------------------------------------------------------------------
@@ -907,6 +972,15 @@ PAGE = r"""<!DOCTYPE html>
     color:#fff;border-color:var(--accent);background:linear-gradient(180deg,#2a2030,#1d1822)}
   .ramchip.warn{color:var(--amber);border-color:var(--amber);background:rgba(245,179,74,.18)}
   .ramchip.critical{color:var(--red);border-color:var(--red);background:rgba(239,91,107,.22);animation:pulse-red 1.6s infinite}
+  #purgenote .pn{color:var(--amber);font-weight:600}
+  .purgewarn{margin-top:5px;color:var(--amber);font-size:12px;font-weight:600}
+  .alert{margin:0 0 16px;padding:11px 14px;border:1px solid var(--red);border-radius:10px;
+    background:rgba(239,91,107,.13);color:var(--txt);font-size:13px}
+  .alert .atitle{color:var(--red);font-weight:700}
+  .alert details{margin-top:6px}
+  .alert summary{cursor:pointer;color:var(--amber);font-size:12px;width:max-content}
+  .alert pre{margin:6px 0 0;padding:8px 10px;background:var(--bg);border:1px solid var(--line);
+    border-radius:7px;font-size:11.5px;white-space:pre-wrap;color:var(--dim);overflow-x:auto}
   @keyframes pulse-red{0%{box-shadow:0 0 0 0 rgba(239,91,107,.55)}70%{box-shadow:0 0 0 6px rgba(239,91,107,0)}100%{box-shadow:0 0 0 0 rgba(239,91,107,0)}}
   table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
   th,td{text-align:left;padding:11px 13px;border-bottom:1px solid var(--line);vertical-align:top}
@@ -975,6 +1049,7 @@ PAGE = r"""<!DOCTYPE html>
       <div>
         <h1>Claude Sessions</h1>
         <div class="sub"><span id="sub">scanning…</span><span class="count" id="count"></span><button id="refresh" class="copy refresh-sm" title="Refresh now">↻</button></div>
+        <div class="sub" id="purgenote" style="display:none"></div>
       </div>
     </div>
     <div class="chips">
@@ -982,6 +1057,8 @@ PAGE = r"""<!DOCTYPE html>
       <label class="chip"><input type="checkbox" id="group" style="margin-right:6px">Group by project</label>
     </div>
   </header>
+
+  <div class="alert" id="settingserr" style="display:none"></div>
 
   <div class="statbar" id="cards2"></div>
 
@@ -1098,7 +1175,7 @@ function rowHtml(s){
     </tr>
     <tr class="sub">
       <td class="dotcell subflag"><span class="flagbtn${s.flagged?' on':''}" data-id="${s.id}" data-kind="flag" title="${s.flagged?'Flagged — reopen after restart':'Flag to reopen after restart'}">⚑</span></td>
-      <td colspan="${COLS.length-2}"><div class="subrow"><span class="subname">${s.title?`<span class="ttl">${esc(s.title)}</span>`:''}</span><div class="prev">${esc(s.preview)}</div>${s.title?'':`<span class="sidtail" title="session ${esc(s.id)} — matches the statusline #${esc(s.id.slice(-4))}">#${esc(s.id.slice(-4))}</span>`}</div></td>
+      <td colspan="${COLS.length-2}"><div class="subrow"><span class="subname">${s.title?`<span class="ttl">${esc(s.title)}</span>`:''}</span><div class="prev">${esc(s.preview)}</div>${s.title?'':`<span class="sidtail" title="session ${esc(s.id)} — matches the statusline #${esc(s.id.slice(-4))}">#${esc(s.id.slice(-4))}</span>`}</div>${purgeRow(s)}</td>
       <td class="subdone"><span class="flagbtn done${s.done?' on':''}" data-id="${s.id}" data-kind="done" title="${s.done?'Marked done — click to restore':'Mark done (hide)'}">✕</span></td>
     </tr>
   </tbody>`;
@@ -1218,6 +1295,39 @@ function fillProjects(){
 // thresholds for the header RAM chip's "excessive" background tint — total
 // RSS across open Claude sessions, not system-wide (the OS has its own
 // memory-pressure indicator for that)
+// Purge warnings: Claude Code prunes transcripts older than cleanupPeriodDays.
+// The header banner counts sessions <48h from purge; each row warns <24h out.
+const PURGE_WARN_H=48, PURGE_CRIT_H=24;
+let CLEANUP_DAYS=null;  // set from the API each load()
+function hoursToPurge(s){return s.expires_ts?(s.expires_ts-now())/3600:Infinity;}
+function purgeNote(list){
+  // subtle informational line under "Updated" — only the count is tinted; the
+  // resume hint lives in the tooltip so the line stays quiet for a rolling window
+  let el=$('#purgenote');if(!el)return;
+  let soon=list.filter(s=>!s.done && hoursToPurge(s)<PURGE_WARN_H);
+  if(!soon.length){el.style.display='none';el.innerHTML='';el.removeAttribute('title');return;}
+  el.style.display='';
+  el.title=`Claude Code deletes transcripts older than ${CLEANUP_DAYS} days (by file mtime). Resume a session to reset its timer.`;
+  el.innerHTML=`<span class="pn">${soon.length}</span> session${soon.length>1?'s':''} will be purged within ${PURGE_WARN_H} hours`;
+}
+function settingsAlert(err){
+  // loud, unlike the purge note: a broken settings file is a real problem.
+  // esc() everything — err.detail is a raw parser/OS message.
+  let el=$('#settingserr');if(!el)return;
+  if(!err){el.style.display='none';el.innerHTML='';return;}
+  el.style.display='';
+  let detail=err.detail?`<details><summary>Details</summary><pre>${esc(err.detail)}</pre></details>`:'';
+  el.innerHTML=`<span class="atitle">⚠ Settings problem</span> — ${esc(err.message)}. `
+    +`Using the default ${CLEANUP_DAYS}-day retention window for purge warnings.${detail}`;
+}
+function purgeRow(s){
+  if(s.done) return '';
+  let h=hoursToPurge(s);
+  if(h>=PURGE_CRIT_H) return '';
+  let msg = h<0 ? `is past its ${CLEANUP_DAYS}-day retention window and will be purged the next time Claude Code starts`
+                : `will be purged within ${PURGE_CRIT_H} hours`;
+  return `<div class="purgewarn" title="Claude Code deletes transcripts older than ${CLEANUP_DAYS} days (by file mtime). Resume the session to reset the timer.">⚠️ Warning: this session ${msg}.</div>`;
+}
 const RAM_WARN_KB=3*1024*1024, RAM_CRIT_KB=6*1024*1024;
 function ramChip(list){
   let kb=list.reduce((a,x)=>a+(x.rss_kb||0),0);
@@ -1230,9 +1340,9 @@ function ramChip(list){
 
 async function load(){
   let r=await fetch('api/sessions?t='+Date.now());let j=await r.json();
-  DATA=j.sessions;generated=j.generated;
+  DATA=j.sessions;generated=j.generated;CLEANUP_DAYS=j.cleanup_period_days;
   $('#sub').textContent='Updated '+stamp(generated);
-  ramChip(DATA);
+  ramChip(DATA);purgeNote(DATA);settingsAlert(j.settings_error);
   cards2();fillProjects();renderFavs();render();
 }
 
