@@ -43,6 +43,10 @@ recovery console.
   screenshot when the UI changes; see the script's docstring.
 - `AI/dashboard.md` — implementation details: session-file parsing, data model,
   the embedded SPA, gotchas.
+- `AI/search.md` — design (not yet built, **ready to implement**) for full
+  transcript-on-disk search: raw-byte JSON-encoded-query prefilter → parse only
+  hit files → snippet results with metadata highlights, deep-linked to the
+  matching turn (`#t<idx>`). Distinct from the existing metadata filter.
 - `AI/remote.md` — design (not yet built) for aggregating sessions from other
   servers via an SSH-pipe `--emit` role, hub merge, and adaptive polling.
 - `AI/session-ipc-research.md` — background research for squad: notification

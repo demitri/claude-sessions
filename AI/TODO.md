@@ -20,6 +20,10 @@ Open ideas (none blocking; v1 works):
       UI change when no `.squad/` workspace exists.** Design in `AI/squad.md`
       — written 2026-07-05, needs review rounds (codex → sonnet → opus) before
       build. Product stance: claude-sessions is the product; squad is a feature.
+- [ ] **Transcript-on-disk search** — full-text search across every transcript
+      (not just metadata): raw-byte JSON-encoded-query prefilter → parse only hit
+      files → snippet results with metadata highlights, deep-linked to the
+      matching turn. **Design complete in `AI/search.md`; ready to implement.**
 - [ ] **Copy-all-resume** button — one click to copy every visible (filtered)
       session's resume command, for fast post-reboot restoration.
 - [ ] **Context-window column** — `ctx_tokens` is already parsed; surface it
