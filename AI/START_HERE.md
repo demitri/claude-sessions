@@ -43,10 +43,11 @@ recovery console.
   screenshot when the UI changes; see the script's docstring.
 - `AI/dashboard.md` — implementation details: session-file parsing, data model,
   the embedded SPA, gotchas.
-- `AI/search.md` — design (not yet built, **ready to implement**) for full
-  transcript-on-disk search: raw-byte JSON-encoded-query prefilter → parse only
-  hit files → snippet results with metadata highlights, deep-linked to the
-  matching turn (`#t<idx>`). Distinct from the existing metadata filter.
+- `AI/search.md` — full transcript-on-disk search (**built 2026-07-08**):
+  token-AND raw-byte prefilter (superset) → parse only hit files → snippet
+  results with metadata highlights, deep-linked to the matching turn (`#t<idx>`),
+  sub-agent hits grouped under the parent. Distinct from the existing metadata
+  filter. `search_corpus` / `/api/search`; dashboard Filter⇄Transcripts toggle.
 - `AI/remote.md` — design (not yet built) for aggregating sessions from other
   servers via an SSH-pipe `--emit` role, hub merge, and adaptive polling.
 - `AI/session-ipc-research.md` — background research for squad: notification
@@ -65,6 +66,9 @@ recovery console.
 - `AI/TODO.md` — open ideas / next steps.
 - `tests/test_done.py` — isolated stdlib tests for the `--done` CLI / flags
   invariant (17, run under a throwaway `$HOME`): `python3 tests/test_done.py`.
+- `tests/test_search.py` — isolated stdlib tests for transcript search (36,
+  throwaway `$HOME` corpus): prefilter superset property, scope gating, base64
+  exclusion, surfaced caps/errors, sub-agent grouping. `python3 tests/test_search.py`.
 
 ## Conventions a fresh session would otherwise violate
 

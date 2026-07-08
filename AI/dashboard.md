@@ -280,6 +280,14 @@ the prefix idiom would swallow the sessions poll).
   same key space, different value shape).
 - `POST /api/flag` ← `{id, kind, value}` (`kind ∈ {"flag","done"}`) → toggles a
   per-session mark in `flags.json`; returns `{ok, kind, value}`.
+- `GET /api/search?q=<query>[&scope=default|deep][&project=<short>]` → full-text
+  corpus search (`search_corpus`, gzip). Two-stage: a token-AND raw-byte prefilter
+  (a superset — see `_query_needles`) skips files without parsing; only hits are
+  parsed for snippets. Returns `{results:[{session, hit_count, hits:[{turn_index,
+  role, ts, before, match, after, agent?}]}], hit_count, scanned, matched, errors,
+  matched_sessions, truncated, query, scope}`. Sub-agent hits carry `agent=<id>`
+  and group under the parent session; snippets deep-link to `/session?id=…#t<idx>`.
+  Empty `q` → empty results (never a full dump). Design + invariants: `AI/search.md`.
 
 The per-row "view" link (next to `⧉ resume`) opens `/session?id=` in a new tab;
 it is suppressed in the `--once` static snapshot via the `const STATIC=false;`

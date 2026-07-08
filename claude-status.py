@@ -31,6 +31,7 @@ import tempfile
 import threading
 import time
 import webbrowser
+from enum import Enum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -911,6 +912,217 @@ def parse_transcript(path):
 
 
 # ---------------------------------------------------------------------------
+# Transcript-on-disk full-text search (AI/search.md). Two-stage scan: a raw-byte
+# prefilter that is a *guaranteed superset* (never misses a real match) skips
+# files without ever parsing them; only files that pass are parsed for snippets.
+
+
+class SearchScope(Enum):
+    """Corpus-search breadth, mirroring the transcript reader's in-page search:
+    DEFAULT = human prompts + assistant text; DEEP adds the reader's 'all text'
+    scope (tool input/output, thinking, and system markers)."""
+    DEFAULT = "default"
+    DEEP = "deep"
+
+    @classmethod
+    def parse(cls, s):
+        return cls.DEEP if (s or "").strip().lower() == "deep" else cls.DEFAULT
+
+
+_SEARCH_CTX = 120              # chars of context each side of a match in a snippet
+_SEARCH_HITS_PER_SESSION = 5   # snippets returned per session (hit_count reports the true total)
+_SEARCH_MAX_SESSIONS = 300     # cap on returned sessions (truncated flag reports if hit)
+
+
+def _query_needles(q):
+    """Byte substrings that must ALL be present in a file's raw bytes for it to
+    possibly contain `q` in parsed text — a guaranteed-superset prefilter
+    (AI/search.md invariant #1).
+
+    Each whitespace-delimited token is encoded to its in-file JSON form
+    (json.dumps: `"`->`\\"`, `\\`->`\\\\`, non-ASCII stays literal — the Node
+    `JSON.stringify` shape Claude Code writes) and lowercased for a
+    case-insensitive match. Splitting on whitespace is what makes this a correct
+    superset even when a match spans a part/field boundary: the parsed text joins
+    content parts with a single space, so any whitespace-free token, if it matches
+    in the parsed text, lies wholly inside one JSON string value and is therefore
+    contiguous in the raw bytes. AND-ing the tokens is a *necessary* condition for
+    the joined match (it may over-admit files where the tokens sit far apart —
+    harmless, they just parse and yield no hit).
+
+    Returns None when `q` contains non-ASCII: byte-level lowering can't reproduce
+    Unicode case-folding, so a superset can't be guaranteed by raw scan — the
+    caller then parses every file instead (correct, just slower). This is the
+    sanctioned fallback from invariant #1, not a silent skip.
+
+    Caveat (documented, not silently accepted): the ASCII fast path folds file
+    bytes with `bytes.lower()` (ASCII A-Z only), while stage 2 folds parsed text
+    with `str.lower()` (full Unicode). A handful of non-ASCII characters lower to
+    ASCII — U+212A KELVIN SIGN -> 'k', U+0130 -> 'i' — so if a file's ONLY
+    occurrence of an ASCII query token comes from such a fold, the byte prefilter
+    can skip it while stage 2 would match. This is vanishingly rare in real
+    transcripts (the token virtually always also appears as literal ASCII) and the
+    query side can't detect a corpus-side fold, so we accept it as a known edge
+    rather than parse every file for every ASCII query."""
+    if not q.isascii():
+        return None
+    return [json.dumps(t, ensure_ascii=False)[1:-1].lower().encode("utf-8")
+            for t in q.split()]
+
+
+def _turn_search_text(turn, deep):
+    """Concatenated searchable text for one parsed turn, mirroring the reader's
+    `turnSearchText`. DEFAULT scope = assistant text + human-prompt text; DEEP
+    also walks thinking, tool_use (name + input), tool_result, tool_reference,
+    and system markers. Base64 image/document data is excluded *by construction*
+    — those parts are never walked, so blobs can't leak into a snippet."""
+    role = turn.get("role")
+    if role == "system" and not deep:
+        return ""
+    out = []
+
+    def walk(parts):
+        for p in parts:
+            k = p.get("kind")
+            if k == "text":
+                if role == "assistant" or (role == "user" and turn.get("is_prompt")) or deep:
+                    out.append(p.get("text", ""))
+            elif deep:
+                if k == "thinking":
+                    out.append(p.get("text", ""))
+                elif k == "tool_use":
+                    out.append(p.get("name", ""))
+                    inp = p.get("input")
+                    if inp is not None:
+                        out.append(json.dumps(inp, ensure_ascii=False))
+                elif k == "tool_result":
+                    if p.get("parts"):
+                        walk(p["parts"])
+                    else:
+                        out.append(p.get("text", ""))
+                elif k == "tool_reference":
+                    out.append(p.get("tool_name", ""))
+            # image/document (base64) and unknown parts: intentionally not walked
+    walk(turn.get("parts") or [])
+    return " ".join(s for s in out if s)
+
+
+def _first_snippet(text, qlow):
+    """(before, match, after) around the first case-insensitive occurrence of
+    qlow in text, ~_SEARCH_CTX chars each side, whitespace collapsed; None if no
+    occurrence. `match` preserves the source casing."""
+    low = text.lower()
+    i = low.find(qlow)
+    if i < 0:
+        return None
+    n = len(qlow)
+    before = " ".join(text[max(0, i - _SEARCH_CTX):i].split())
+    match = text[i:i + n]
+    after = " ".join(text[i + n:i + n + _SEARCH_CTX].split())
+    return before, match, after
+
+
+def search_corpus(q, scope=SearchScope.DEFAULT, project=None):
+    """Full-text search across every transcript on disk. Returns a dict:
+    {results, hit_count, scanned, matched, matched_sessions, truncated, query,
+    scope}. Sub-agent transcripts are searched and their hits grouped under the
+    parent session (each such hit carries `agent`=<agentId> for deep-linking).
+    Ranked by recency (matches the dashboard)."""
+    q = (q or "").strip()
+    scope_val = scope.value
+    if not q:
+        return {"results": [], "hit_count": 0, "scanned": 0, "matched": 0,
+                "matched_sessions": 0, "truncated": False, "query": q, "scope": scope_val}
+    deep = scope is SearchScope.DEEP
+    qlow = q.lower()
+    needles = _query_needles(q)   # None => non-ASCII => parse every file (safe fallback)
+    open_map = open_sessions()
+    # `errors` counts files we could not fully search (unreadable after glob found
+    # them — e.g. pruned mid-scan — or unlinkable non-hex sub-agent ids). Surfaced
+    # in the response so the UI can say "N files skipped": a skip is never silent.
+    counters = {"scanned": 0, "matched": 0, "errors": 0}
+
+    def scan_file(path):
+        """Prefilter + parse one .jsonl; return its list of hit dicts."""
+        counters["scanned"] += 1
+        if needles is not None:
+            try:
+                with open(path, "rb") as fh:
+                    raw = fh.read().lower()
+            except OSError:
+                counters["errors"] += 1
+                return []
+            if not all(nd in raw for nd in needles):
+                return []
+        parsed = parse_transcript(path)
+        if not parsed:
+            counters["errors"] += 1
+            return []
+        hits = []
+        for t in parsed["turns"]:
+            snip = _first_snippet(_turn_search_text(t, deep), qlow)
+            if snip is None:
+                continue
+            before, match, after = snip
+            hits.append({"turn_index": t["i"], "role": t["role"], "ts": t.get("ts"),
+                         "before": before, "match": match, "after": after})
+        if hits:
+            counters["matched"] += 1
+        return hits
+
+    results = []
+    for spath in sorted(glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))):
+        sid = os.path.basename(spath)[:-len(".jsonl")]
+        sess = None
+        if project:
+            sess = parse_session(spath)
+            if not sess or sess.get("project") != project:
+                continue
+        own = scan_file(spath)
+        sub_hits = []
+        subdir = _subagent_dir(spath)
+        for apath in sorted(glob.glob(os.path.join(glob.escape(subdir), "agent-*.jsonl"))):
+            aid = os.path.basename(apath)[len("agent-"):-len(".jsonl")]
+            if not _HEX_RE.match(aid):
+                # a hit here couldn't be deep-linked (?agent= rejects non-hex ids);
+                # count it as skipped rather than silently omit its content
+                counters["errors"] += 1
+                continue
+            for h in scan_file(apath):
+                sub_hits.append(dict(h, agent=aid))
+        all_hits = own + sub_hits
+        if not all_hits:
+            continue
+        if sess is None:
+            sess = parse_session(spath)
+        if not sess:
+            # we already found hits but can't build the result card without the
+            # parent's metadata (its .jsonl went unreadable — e.g. pruned mid-scan,
+            # while its sub-agent files still matched). Count the drop; never let
+            # found matches vanish silently.
+            counters["errors"] += 1
+            continue
+        results.append({
+            "session": {
+                "id": sess["id"], "project": sess["project"], "title": sess["title"],
+                "updated_ts": sess["updated_ts"], "model": sess["model"],
+                "branch": sess["branch"], "out_tokens": sess["out_tokens"],
+                "resume": sess["resume"], "open": sid in open_map,
+            },
+            "hit_count": len(all_hits),
+            "hits": all_hits[:_SEARCH_HITS_PER_SESSION],
+        })
+
+    results.sort(key=lambda r: r["session"]["updated_ts"], reverse=True)
+    truncated = len(results) > _SEARCH_MAX_SESSIONS
+    return {"results": results[:_SEARCH_MAX_SESSIONS],
+            "hit_count": sum(r["hit_count"] for r in results),
+            "scanned": counters["scanned"], "matched": counters["matched"],
+            "errors": counters["errors"], "matched_sessions": len(results),
+            "truncated": truncated, "query": q, "scope": scope_val}
+
+
+# ---------------------------------------------------------------------------
 PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1039,6 +1251,28 @@ PAGE = r"""<!DOCTYPE html>
     border:1px solid var(--accent);color:#fff;padding:10px 18px;border-radius:10px;opacity:0;transition:.25s;pointer-events:none;box-shadow:0 12px 40px rgba(0,0,0,.5)}
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
   .empty{color:var(--dim);text-align:center;padding:48px}
+  .toolbar.tsearch{margin-top:-6px;align-items:center}
+  .tsearch .tsicon{font-size:18px;color:var(--accent);width:20px;text-align:center;flex:0 0 auto}
+  .tsearch #tq{flex:1 1 320px;min-width:240px}
+  .deepwrap{display:inline-flex;align-items:center}
+  .tnote{color:var(--dim);font-size:12px} .tnote .warn{color:var(--accent)}
+  #count .dim{color:var(--dim)} #count .warn{color:var(--accent)}
+  .scard{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin-bottom:12px;overflow:hidden}
+  .schead{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;padding:11px 15px;border-bottom:1px solid var(--line);background:rgba(255,255,255,.02)}
+  .schead .dot{width:8px;height:8px;border-radius:50%;align-self:center;flex:0 0 auto}
+  .schead .dot.op-open{background:var(--green);box-shadow:0 0 0 3px rgba(67,211,158,.18)} .schead .dot.op-closed{background:#3a3f52}
+  .schead .sproj{font-weight:600;color:var(--txt)} .schead .fam{color:var(--dim);font-weight:400}
+  .schead .sttl{color:var(--dim);font-style:italic}
+  .schead .smeta{color:var(--dim);font-size:12px}
+  .schead .sactions{margin-left:auto;display:flex;gap:12px;white-space:nowrap}
+  .shits{padding:4px 0}
+  a.shit{display:block;padding:7px 15px;color:var(--txt);font-size:13px;line-height:1.5;border-top:1px solid transparent;text-decoration:none}
+  a.shit:hover{background:rgba(122,162,255,.07)}
+  a.shit+a.shit{border-top-color:rgba(255,255,255,.04)}
+  .shit .srole{display:inline-block;min-width:58px;color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.05em;margin-right:6px}
+  .shit mark{background:rgba(201,138,90,.32);color:#fff;border-radius:3px;padding:0 2px}
+  .shit .ell{color:var(--dim)}
+  .smore{padding:6px 15px 9px;color:var(--dim);font-size:12px}
 </style>
 </head>
 <body>
@@ -1065,7 +1299,7 @@ PAGE = r"""<!DOCTYPE html>
   <div class="favs" id="favs"></div>
 
   <div class="toolbar">
-    <input class="search" id="q" placeholder="Filter by project, title, message, branch, id…">
+    <input class="search" id="q" placeholder="Filter shown sessions — project, title, message, branch, id…">
     <select id="projsel"><option value="">All projects</option></select>
     <span class="chip" id="openchip" title="Show only open sessions (combines with the time filter)">● Open</span>
     <span class="chip" id="flagchip" title="Show only sessions flagged to reopen after restart">⚑ Flagged</span>
@@ -1076,6 +1310,14 @@ PAGE = r"""<!DOCTYPE html>
       <span class="chip" data-s="recent">Active ·2h</span>
       <span class="chip on" data-s="day">24h</span>
     </div>
+  </div>
+
+  <div class="toolbar tsearch" id="tsearch">
+    <span class="tsicon" title="Full-text search across every transcript on disk">⌕</span>
+    <input class="search" id="tq" placeholder="Search transcript text across every session on disk — press Enter…">
+    <label class="chip deepwrap" title="Also search tool input/output, thinking and system markers"><input type="checkbox" id="deep" style="margin-right:6px">all text</label>
+    <span class="chip" id="tclear" style="display:none" title="Clear the transcript search and return to browsing">✕ clear</span>
+    <span class="tnote" id="tnote"></span>
   </div>
 
   <div id="view"></div>
@@ -1126,17 +1368,18 @@ function passStatus(s){if(s.done && !showDone)return false;
   if(statusF==='all')return true;let d=now()-s.updated_ts;
   if(statusF==='live')return d<900;if(statusF==='recent')return d<7200;if(statusF==='day')return d<86400;return true;}
 
-function filtered(){
-  let q=$('#q').value.toLowerCase().trim();
+// the #q text box + project dropdown — the two controls that narrow EITHER the
+// browse table or the transcript-search result cards (the status/time chips are
+// browse-only, applied via passStatus below).
+function metaMatch(s){
   let p=$('#projsel').value;
-  return DATA.filter(s=>{
-    if(!passStatus(s))return false;
-    if(p && s.project!==p)return false;
-    if(q){let hay=(s.project+' '+s.title+' '+s.preview+' '+s.branch+' '+s.id+' '+s.model).toLowerCase();
-      if(!hay.includes(q))return false;}
-    return true;
-  });
+  if(p && s.project!==p)return false;
+  let q=$('#q').value.toLowerCase().trim();
+  if(q){let hay=(s.project+' '+s.title+' '+(s.preview||'')+' '+s.branch+' '+s.id+' '+s.model).toLowerCase();
+    if(!hay.includes(q))return false;}
+  return true;
 }
+function filtered(){return DATA.filter(s=>passStatus(s)&&metaMatch(s));}
 function sorted(list){
   let l=list.slice();
   l.sort((a,b)=>{let x=a[sortKey],y=b[sortKey];
@@ -1190,6 +1433,7 @@ function thHtml(){
 }
 
 function render(){
+  if(SEARCH){renderSearchResults();return;}   // transcript-search results view
   let list=sorted(filtered());
   $('#count').textContent='· '+list.length+' of '+DATA.length+' sessions';
   let grouped=$('#group').checked;
@@ -1343,11 +1587,85 @@ async function load(){
   DATA=j.sessions;generated=j.generated;CLEANUP_DAYS=j.cleanup_period_days;
   $('#sub').textContent='Updated '+stamp(generated);
   ramChip(DATA);purgeNote(DATA);settingsAlert(j.settings_error);
-  cards2();fillProjects();renderFavs();render();
+  cards2();fillProjects();renderFavs();render();   // render() routes to the browse or search view
 }
 
-$('#q').oninput=render;
-$('#projsel').onchange=()=>{render();renderFavs();};
+// --- transcript-on-disk full-text search (the SECOND field, #tq) -------------
+// A separate box from the metadata Filter (#q): #tq runs a full-text /api/search
+// across every transcript on disk (Enter), #q then narrows the RESULTS (and the
+// project dropdown too). SEARCH holds the active result set; null = browsing.
+let SEARCH=null, _searchSeq=0;
+
+function snipInner(h){
+  const role=h.agent?'sub-agent':(h.role==='user'?'you':(h.role==='assistant'?'claude':esc(h.role)));
+  return `<span class="srole">${role}</span><span class="ell">…</span>${esc(h.before)}<mark>${esc(h.match)}</mark>${esc(h.after)}<span class="ell">…</span>`;
+}
+function cardHtml(s){   // s = a matched session joined onto its full metadata + {hits, hit_count}
+  const hits=(s.hits||[]).map(h=>{
+    const href='session?id='+encodeURIComponent(s.id)+(h.agent?'&agent='+encodeURIComponent(h.agent):'')+'#t'+h.turn_index;
+    return `<a class="shit" href="${href}" target="_blank" rel="noopener">${snipInner(h)}</a>`;
+  }).join('');
+  const extra=(s.hit_count||0)-(s.hits||[]).length;
+  const more=extra>0?`<div class="smore">+${extra} more match${extra===1?'':'es'} in this session</div>`:'';
+  const op=s.open?(s.live_status==='busy'?'op-busy':'op-open'):'op-closed';
+  return `<div class="scard">
+    <div class="schead">
+      <span class="dot ${op}" title="${s.open?'Open':'Closed'}"></span>
+      <span class="favtoggle sproj" data-proj="${esc(s.project)}" title="Add/remove shortcut">${projName(s.project)}</span>
+      ${s.title?`<span class="sttl">${esc(s.title)}</span>`:''}
+      <span class="smeta">${rel(s.updated_ts)} · ${esc(s.model)||'–'}${s.branch?' · ⎇ '+esc(s.branch):''} · ${ktok(s.out_tokens)} out</span>
+      <span class="sactions">${STATIC?'':`<a class="copy" href="session?id=${encodeURIComponent(s.id)}" target="_blank" rel="noopener" title="Open the transcript">view</a>`}<span class="copy" data-cmd="${esc(s.resume)}">⧉ resume</span></span>
+    </div>
+    <div class="shits">${hits}${more}</div>
+  </div>`;
+}
+function renderSearchResults(){
+  const v=$('#view');
+  const shown=sorted(SEARCH.sessions.filter(metaMatch));   // #q + project narrow the results
+  const total=SEARCH.sessions.length,m=SEARCH.meta;
+  $('#count').innerHTML='· '+shown.length+(shown.length!==total?' of '+total:'')
+    +' matched session'+(total===1?'':'s')+', '+m.hit_count+' hit'+(m.hit_count===1?'':'s');
+  if(!shown.length){
+    v.innerHTML='<div class="empty">'+(total
+      ? 'No matched sessions pass the Filter above — clear the Filter box or project to see all '+total+'.'
+      : 'No transcripts match “'+esc(m.query)+'”.')+'</div>';
+    return;
+  }
+  v.innerHTML=shown.map(cardHtml).join('');
+  v.querySelectorAll('.copy[data-cmd]').forEach(b=>b.onclick=()=>{
+    navigator.clipboard.writeText(b.dataset.cmd).then(()=>toast('Copied: '+b.dataset.cmd.slice(0,48)+'…'));});
+  v.querySelectorAll('.favtoggle').forEach(el=>el.onclick=()=>toggleFav(el.dataset.proj));
+}
+async function runCorpusSearch(){
+  const q=$('#tq').value.trim();
+  if(!q){clearSearch();return;}
+  const seq=++_searchSeq;
+  $('#tnote').textContent='searching…';$('#tclear').style.display='';
+  const scope=$('#deep').checked?'deep':'default';
+  let data;
+  try{const r=await fetch('api/search?q='+encodeURIComponent(q)+'&scope='+scope);
+    if(!r.ok)throw new Error('HTTP '+r.status);data=await r.json();}
+  catch(e){if(seq===_searchSeq)$('#tnote').innerHTML='<span class="warn">search failed: '+esc(e.message)+'</span>';return;}
+  if(seq!==_searchSeq)return;   // a newer search superseded this one
+  // join each hit-set onto the full local metadata record (DATA) by id, so the
+  // cards + the Filter box see every field (preview/done/live_status/…); fall back
+  // to the search's own slim session fields for a row not loaded locally
+  const byId={};DATA.forEach(s=>byId[s.id]=s);
+  SEARCH={meta:data,sessions:data.results.map(r=>Object.assign({},byId[r.session.id]||r.session,
+    {hits:r.hits,hit_count:r.hit_count}))};
+  let note='scanned '+data.scanned+' file'+(data.scanned===1?'':'s');
+  if(data.errors)note+=' · <span class="warn">'+data.errors+' skipped</span>';
+  if(data.truncated)note+=' · <span class="warn">showing first '+data.results.length+'</span>';
+  $('#tnote').innerHTML=note;
+  render();
+}
+function clearSearch(){SEARCH=null;$('#tq').value='';$('#tclear').style.display='none';$('#tnote').textContent='';render();}
+
+$('#q').oninput=render;                                  // Filter box narrows browse OR results
+$('#projsel').onchange=()=>{render();renderFavs();};     // project narrows browse OR results
+$('#tq').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();runCorpusSearch();}});
+$('#deep').onchange=()=>{if($('#tq').value.trim())runCorpusSearch();};   // rescope live search
+$('#tclear').onclick=clearSearch;
 $('#group').onchange=render;
 $('#refresh').onclick=load;
 document.querySelectorAll('#status .chip').forEach(c=>c.onclick=()=>{
@@ -1359,6 +1677,8 @@ document.querySelectorAll('#status .chip').forEach(c=>c.onclick=()=>{
 $('#openchip').onclick=()=>{openOnly=!openOnly;$('#openchip').classList.toggle('on',openOnly);render();};
 $('#flagchip').onclick=()=>{flaggedOnly=!flaggedOnly;$('#flagchip').classList.toggle('on',flaggedOnly);render();};
 $('#donechip').onclick=()=>{showDone=!showDone;$('#donechip').classList.toggle('on',showDone);render();};
+// transcript search needs the live server; a static --once snapshot can't reach it
+if(STATIC)$('#tsearch').style.display='none';
 renderFavs();
 load();
 setInterval(load,30000);
@@ -2146,7 +2466,19 @@ async function load(){
   renderMeta();renderTurns();renderNav();renderAgents();
   allOpen=false;$('#expand').textContent='expand all';
   runSearch();
+  jumpHash();   // honor #t<idx> from a corpus-search deep link
 }
+
+// Corpus-search snippets deep-link to /session?id=…#t<turn_index>; on load (and
+// on any later hash change) scroll to that turn node and flash it. Reuses the
+// same jump/flash machinery as the prompt/sub-agent navigators.
+function jumpHash(){
+  const m=/^#t(\d+)$/.exec(location.hash||'');
+  if(!m)return;
+  const node=document.getElementById('t'+m[1]);
+  if(node){node.scrollIntoView({block:'center'});flash(node);}
+}
+window.addEventListener('hashchange',jumpHash);
 load();
 </script>
 </body>
@@ -2217,10 +2549,22 @@ class Handler(BaseHTTPRequestHandler):
             self._json(collect())
         elif u.path == "/api/session":
             self._api_session(u.query)
+        elif u.path == "/api/search":
+            self._api_search(u.query)
         elif u.path == "/session":
             self._html(TRANSCRIPT_PAGE)
         else:
             self._html(PAGE)
+
+    def _api_search(self, query):
+        """GET /api/search?q=<query>[&scope=default|deep][&project=<short>]
+        → full-text corpus search results (see search_corpus / AI/search.md).
+        Empty q returns empty results, never a full dump."""
+        p = parse_qs(query)
+        term = (p.get("q") or [""])[0]
+        scope = SearchScope.parse((p.get("scope") or [""])[0])
+        project = (p.get("project") or [""])[0].strip() or None
+        self._json(search_corpus(term, scope, project), gz=True)
 
     def _api_session(self, query):
         """GET /api/session?id=<id>[&agent=<agentId>] → parsed transcript JSON.

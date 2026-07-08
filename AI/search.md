@@ -1,12 +1,45 @@
-# transcript-on-disk search (design — not built)
+# transcript-on-disk search (BUILT 2026-07-08)
 
-**Status:** designed 2026-07-07, not built. Ready to implement in a fresh
-session. This is a full-text search *across every transcript on disk*, distinct
-from the dashboard's existing metadata filter (which only matches the fields
-already loaded: project / title / preview / branch / id / model). Here you grep
-the actual conversation content and get back matching sessions with **metadata
+**Status:** designed 2026-07-07, **built 2026-07-08**. Live in `claude-status.py`
+(`search_corpus` / `/api/search` + the dashboard's Filter⇄Transcripts toggle).
+Tests: `tests/test_search.py` (36 checks, incl. the superset invariants). This is
+a full-text search *across every transcript on disk*, distinct from the
+dashboard's existing metadata filter (which only matches the fields already
+loaded: project / title / preview / branch / id / model). Here you grep the
+actual conversation content and get back matching sessions with **metadata
 highlights + local snippet context**, each snippet deep-linked to the matching
 turn in the transcript reader.
+
+## As-built notes (where the code diverged from / firmed up the design)
+
+- **Prefilter is token-AND, not whole-query.** `_query_needles` splits the query
+  on whitespace and requires *every* token's JSON-encoded byte form to be present
+  — this is what preserves the superset guarantee across part/field boundaries
+  (a whole-query raw substring would miss cross-part matches). See its docstring.
+- **Non-ASCII queries skip the prefilter entirely** (return `None`) and parse
+  every file — the invariant-#1 fallback. One documented, accepted Unicode edge
+  remains (corpus-side `U+212A`/`U+0130` folds); see the docstring + invariant #1.
+- **Sub-agent hits are grouped under the parent session** and carry `agent=<id>`
+  for the `&agent=…#t<idx>` deep link — not separate result cards.
+- **`errors` counter** in the response surfaces every file that was found but
+  couldn't be fully searched (unreadable/pruned mid-scan, or an unlinkable
+  non-hex sub-agent id). The dashboard shows "N files skipped". No silent drops.
+- One hit per matching *turn* (first occurrence); `hit_count` is the true total,
+  `hits` capped at 5/session — the cap is surfaced ("+N more matches").
+- **Frontend is two separate fields, not a mode toggle** (the toggle was the first
+  cut; it defaulted to metadata-filter — surprising — and shifted the toolbar when
+  the deep checkbox appeared/disappeared). Row 1 = the metadata Filter box `#q` +
+  project dropdown (instant, client-side). Row 2 (`#tsearch`) = the transcript
+  search box `#tq` + `all text` (`#deep`, `scope=deep`) + `✕ clear`; Enter runs
+  `/api/search`. Row 2 is hidden in the static `--once` snapshot (no server).
+- **Composition:** a search result set is joined onto the full local `DATA`
+  record by id (so cards + filtering see every field: preview/done/live_status/…),
+  falling back to the API's slim `session` for a row not loaded locally. The
+  Filter box `#q` **and** the project dropdown then narrow the *result cards*
+  (`metaMatch`), instant. The status/time/open/flagged/done chips stay
+  **browse-only** — deliberately: a full-text hit is usually old, so applying the
+  default 24h window would hide most results. `SEARCH` (null = browsing) drives
+  `render()`'s branch. Deep-link handler `jumpHash()` in `TRANSCRIPT_PAGE`.
 
 ## Why it fits (feasibility — already assessed)
 
@@ -98,7 +131,14 @@ build the cache pre-emptively.
 
 1. The JSON-encoded-query prefilter must be a **guaranteed superset** — test it
    with quote/backslash/non-ASCII queries. If ever uncertain, fall back to
-   full-parse scan rather than risk a miss.
+   full-parse scan rather than risk a miss. **As built:** non-ASCII queries take
+   the full-parse fallback (`_query_needles` returns `None`); ASCII queries use a
+   token-AND byte prefilter that is a superset even across part/field boundaries.
+   One documented, accepted edge remains: a few non-ASCII chars (`U+212A`→`k`,
+   `U+0130`→`i`) lower to ASCII under `str.lower()` but not `bytes.lower()`, so a
+   file whose only match arises from such a corpus-side fold could be skipped —
+   negligible in practice, and the query side can't detect it. See the
+   `_query_needles` docstring.
 2. Base64 exclusion is an **explicit** decision, commented — not a side effect.
 3. Any cap (per-session hits, total files/results) is **surfaced** in the
    response and shown in the UI — never a silent truncation.
